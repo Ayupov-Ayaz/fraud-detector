@@ -17,6 +17,7 @@ A comprehensive analysis tool for gaming transaction logs that detects suspiciou
 ## ✨ Features
 
 - **Multi-file Analysis**: Process multiple JSON log files simultaneously
+- **Loki API Integration**: Automatically fetch logs from Loki server with smart chunking
 - **Duplicate Detection**: Automatically identifies and skips duplicate bets and wins using `betID` and `winID`
 - **Fraud Detection**: Identifies suspicious patterns like abnormally high RTP (Return to Player)
 - **Comprehensive Reports**: Detailed analysis including:
@@ -26,6 +27,7 @@ A comprehensive analysis tool for gaming transaction logs that detects suspiciou
   - Hourly activity breakdown
   - Top bets and wins tracking
 - **Data Integrity**: Validates transaction uniqueness and reports any inconsistencies
+- **Smart Log Fetching**: Automatically splits time ranges to avoid Loki's 1000-log limit
 - **Multi-currency Support**: Currently optimized for NGN (Nigerian Naira)
 
 ## 🚀 Installation
@@ -50,11 +52,12 @@ go version
 
 ## 📖 Usage
 
-### Basic Usage
+### Basic Usage (File Analysis)
 
-1. **Place your JSON log files** in the same directory as the `main.go` file
+1. **Place your JSON log files** in the `resources/` folder
    - Files should be named descriptively (e.g., `25.12.2025.json`, `26.12.2025-morning.json`)
-   - The tool automatically detects all `*.json` files in the directory
+   - The tool automatically detects all `*.json` files in the resources directory
+   - If the resources folder doesn't exist, it will be created automatically
 
 2. **Run the analysis**
 ```bash
@@ -66,7 +69,42 @@ go run main.go
    - Data integrity checks
    - Comprehensive analysis report
 
-### Advanced Usage
+### Advanced Usage (Loki API Integration)
+
+**Automatically fetch logs from Loki:**
+
+1. **Create Loki configuration file** by copying the example:
+```bash
+cp loki-config.json.example loki-config.json
+```
+
+2. **Configure your Loki connection** in `loki-config.json`:
+```json
+{
+  "url": "http://your-loki-server:3100",
+  "username": "your-username",
+  "password": "your-password-or-token", 
+  "tenant_id": "your-tenant-id"
+}
+```
+
+3. **Run the analysis** - it will automatically:
+   - Fetch logs from Loki for the last 7 days
+   - Split requests into 4-hour chunks (avoiding 1000-log limit)
+   - Save logs to `resources/` directory
+   - Analyze all collected data
+
+```bash
+go run main.go
+```
+
+**Loki Configuration Options:**
+- `url`: Loki server URL (required)
+- `username`: Username for basic authentication (optional)
+- `password`: Password or API token (optional)  
+- `tenant_id`: Tenant ID for multi-tenant setups (optional)
+
+### Manual Compilation
 
 **Compile for better performance:**
 ```bash

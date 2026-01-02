@@ -3,7 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -126,15 +129,54 @@ type TopWin struct {
 	Time    string `json:"time"`
 }
 
+// Loki API Configuration
+type LokiConfig struct {
+	URL      string `json:"url"`       // Loki server URL (e.g., http://localhost:3100)
+	Username string `json:"username"`  // Optional: for basic auth
+	Password string `json:"password"`  // Optional: for basic auth or token
+	TenantID string `json:"tenant_id"` // Optional: for multi-tenant setups
+}
+
+// Loki API Response structures
+type LokiResponse struct {
+	Status string   `json:"status"`
+	Data   LokiData `json:"data"`
+}
+
+type LokiData struct {
+	ResultType string       `json:"resultType"`
+	Result     []LokiStream `json:"result"`
+}
+
+type LokiStream struct {
+	Stream map[string]string `json:"stream"`
+	Values [][]string        `json:"values"`
+}
+
+// Time range for fetching logs
+type TimeRange struct {
+	Start time.Time
+	End   time.Time
+	Label string // Human readable label for the time range
+}
+
 func run() error {
-	// Find all JSON files in current directory
+	// Check if we should fetch from Loki first
+	if shouldFetchFromLoki() {
+		if err := fetchLogsFromLoki(); err != nil {
+			fmt.Printf("⚠️ Failed to fetch from Loki: %v\n", err)
+			fmt.Println("Continuing with existing files...")
+		}
+	}
+
+	// Find all JSON files in resources directory
 	files, err := findJSONFiles()
 	if err != nil {
 		return fmt.Errorf("finding JSON files: %w", err)
 	}
 
 	if len(files) == 0 {
-		return fmt.Errorf("no JSON files found in current directory")
+		return fmt.Errorf("no JSON files found in resources directory")
 	}
 
 	fmt.Printf("📁 Found %d JSON files to analyze:\n", len(files))
@@ -167,14 +209,238 @@ func main() {
 }
 
 func findJSONFiles() ([]string, error) {
-	pattern := "*.json"
-	files, err := filepath.Glob(pattern)
+	// Look only in resources directory
+	resourcesDir := "./resources"
+
+	// Ensure resources directory exists
+	if err := os.MkdirAll(resourcesDir, 0755); err != nil {
+		return nil, fmt.Errorf("creating resources directory: %w", err)
+	}
+
+	// Find all JSON files in resources directory
+	resourceFiles, err := filepath.Glob(filepath.Join(resourcesDir, "*.json"))
 	if err != nil {
-		return nil, fmt.Errorf("globbing files: %w", err)
+		return nil, fmt.Errorf("globbing files in resources: %w", err)
 	}
 
 	// Sort files by name for consistent processing order
-	return files, nil
+	sort.Strings(resourceFiles)
+	return resourceFiles, nil
+}
+
+func shouldFetchFromLoki() bool {
+	// Check if loki-config.json exists
+	if _, err := os.Stat("loki-config.json"); err == nil {
+		return true
+	}
+	return false
+}
+
+func loadLokiConfig() (*LokiConfig, error) {
+	data, err := os.ReadFile("loki-config.json")
+	if err != nil {
+		return nil, fmt.Errorf("reading loki config: %w", err)
+	}
+
+	var config LokiConfig
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("parsing loki config: %w", err)
+	}
+
+	// Validate required fields
+	if config.URL == "" {
+		return nil, fmt.Errorf("loki URL is required in config")
+	}
+
+	return &config, nil
+}
+
+func fetchLogsFromLoki() error {
+	fmt.Println("🔄 Fetching logs from Loki...")
+
+	config, err := loadLokiConfig()
+	if err != nil {
+		return err
+	}
+
+	// Define time ranges to fetch (avoid 1000 log limit)
+	timeRanges := generateTimeRanges()
+
+	for _, timeRange := range timeRanges {
+		fmt.Printf("📅 Fetching logs for: %s\n", timeRange.Label)
+
+		logs, err := queryLokiLogs(config, timeRange)
+		if err != nil {
+			fmt.Printf("   ⚠️ Failed to fetch logs for %s: %v\n", timeRange.Label, err)
+			continue
+		}
+
+		if len(logs) == 0 {
+			fmt.Printf("   ℹ️ No logs found for %s\n", timeRange.Label)
+			continue
+		}
+
+		// Save logs to resources directory
+		filename := fmt.Sprintf("resources/%s.json",
+			strings.ReplaceAll(timeRange.Label, " ", "_"))
+
+		if err := saveLokiLogsToFile(logs, filename); err != nil {
+			fmt.Printf("   ⚠️ Failed to save logs for %s: %v\n", timeRange.Label, err)
+			continue
+		}
+
+		fmt.Printf("   ✅ Saved %d log entries to %s\n", len(logs), filename)
+
+		// Add small delay to avoid overwhelming Loki
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	return nil
+}
+
+func generateTimeRanges() []TimeRange {
+	now := time.Now()
+
+	// Generate ranges for the last 7 days, split into manageable chunks
+	var ranges []TimeRange
+
+	for i := 6; i >= 0; i-- {
+		day := now.AddDate(0, 0, -i)
+
+		// Split each day into 4-hour chunks to stay under 1000 log limit
+		for hour := 0; hour < 24; hour += 4 {
+			start := time.Date(day.Year(), day.Month(), day.Day(), hour, 0, 0, 0, day.Location())
+			end := start.Add(4 * time.Hour)
+
+			// Don't go beyond current time
+			if end.After(now) {
+				end = now
+			}
+
+			if start.Before(now) {
+				ranges = append(ranges, TimeRange{
+					Start: start,
+					End:   end,
+					Label: fmt.Sprintf("%s_%02d-%02d",
+						start.Format("2006-01-02"), hour, hour+4),
+				})
+			}
+		}
+	}
+
+	return ranges
+}
+
+func queryLokiLogs(config *LokiConfig, timeRange TimeRange) ([]LogEntry, error) {
+	// Build Loki query URL
+	baseURL := strings.TrimSuffix(config.URL, "/") + "/loki/api/v1/query_range"
+
+	// LogQL query for gaming logs
+	query := `{level="info"} |= "SendBet" or "SendWin"`
+
+	// Prepare query parameters
+	params := url.Values{}
+	params.Add("query", query)
+	params.Add("start", fmt.Sprintf("%d", timeRange.Start.UnixNano()))
+	params.Add("end", fmt.Sprintf("%d", timeRange.End.UnixNano()))
+	params.Add("limit", "1000") // Loki's default limit
+	params.Add("direction", "forward")
+
+	fullURL := fmt.Sprintf("%s?%s", baseURL, params.Encode())
+
+	// Create HTTP request
+	req, err := http.NewRequest("GET", fullURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	// Add authentication if provided
+	if config.Username != "" && config.Password != "" {
+		req.SetBasicAuth(config.Username, config.Password)
+	}
+
+	// Add tenant header if provided
+	if config.TenantID != "" {
+		req.Header.Set("X-Scope-OrgID", config.TenantID)
+	}
+
+	// Make the request
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("executing request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("loki returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Parse Loki response
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
+
+	var lokiResp LokiResponse
+	if err := json.Unmarshal(body, &lokiResp); err != nil {
+		return nil, fmt.Errorf("parsing loki response: %w", err)
+	}
+
+	if lokiResp.Status != "success" {
+		return nil, fmt.Errorf("loki query failed with status: %s", lokiResp.Status)
+	}
+
+	// Convert Loki logs to our LogEntry format
+	var logEntries []LogEntry
+	for _, stream := range lokiResp.Data.Result {
+		for _, value := range stream.Values {
+			if len(value) >= 2 {
+				// value[0] is timestamp (nanoseconds), value[1] is log line
+				timestamp := value[0]
+				logLine := value[1]
+
+				// Convert nanosecond timestamp to RFC3339
+				if ns, err := strconv.ParseInt(timestamp, 10, 64); err == nil {
+					rfc3339Time := time.Unix(0, ns).Format(time.RFC3339Nano)
+
+					logEntry := LogEntry{
+						Line:      logLine,
+						Timestamp: rfc3339Time,
+						Fields:    make(map[string]any),
+					}
+
+					// Add stream labels to fields
+					for k, v := range stream.Stream {
+						logEntry.Fields[k] = v
+					}
+
+					logEntries = append(logEntries, logEntry)
+				}
+			}
+		}
+	}
+
+	return logEntries, nil
+}
+
+func saveLokiLogsToFile(logs []LogEntry, filename string) error {
+	// Ensure resources directory exists
+	if err := os.MkdirAll("resources", 0755); err != nil {
+		return fmt.Errorf("creating resources directory: %w", err)
+	}
+
+	data, err := json.MarshalIndent(logs, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling logs: %w", err)
+	}
+
+	if err := os.WriteFile(filename, data, 0644); err != nil {
+		return fmt.Errorf("writing file: %w", err)
+	}
+
+	return nil
 }
 
 func readLogsEntry(fileName string) ([]LogEntry, error) {
