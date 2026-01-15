@@ -153,9 +153,24 @@ func run() error {
 		return err
 	}
 
-	report := generateReport(gameData)
+	// Detect currency before generating report - fail if not found
+	detectedCurrency := ""
+	for _, data := range gameData {
+		if data.Currency != "" {
+			detectedCurrency = data.Currency
+			break
+		}
+	}
 
-	printReport(report)
+	if detectedCurrency == "" {
+		return fmt.Errorf("❌ ERROR: No currency information found in logs. Please ensure your logs contain currency field")
+	}
+
+	fmt.Printf("💰 Detected currency: %s\n", detectedCurrency)
+
+	report := generateReport(gameData, detectedCurrency)
+
+	printReport(report, detectedCurrency)
 
 	return nil
 }
@@ -228,7 +243,7 @@ func parseGameData(logs []LogEntry) ([]GameData, error) {
 	return gameData, nil
 }
 
-func generateReport(gameData []GameData) Report {
+func generateReport(gameData []GameData, currency string) Report {
 	report := Report{
 		PlayerStats:      make(map[string]PlayerStat),
 		GameStats:        make(map[string]GameStat),
@@ -242,14 +257,14 @@ func generateReport(gameData []GameData) Report {
 		totalWinAmount int64
 		uniquePlayers          = make(map[string]bool)
 		uniqueGames            = make(map[string]bool)
-		uniqueBetIDs           = make(map[string]bool) // Track processed bet IDs
-		uniqueWinIDs           = make(map[string]bool) // Track processed win IDs
+		uniqueBetIDs           = make(map[string]bool)
+		uniqueWinIDs           = make(map[string]bool)
 		timeStats              = make(map[int]TimeStat)
-		minTime        float64 = -1 // Use -1 to indicate uninitialized
+		minTime        float64 = -1
 		maxTime        float64 = 0
 		playerBalances         = make(map[string][]int64)
-		duplicateBets  int     = 0 // Counter for duplicate bets
-		duplicateWins  int     = 0 // Counter for duplicate wins
+		duplicateBets  int     = 0
+		duplicateWins  int     = 0
 	)
 
 	// Process each game data entry
@@ -467,7 +482,7 @@ func generateReport(gameData []GameData) Report {
 	return report
 }
 
-func printDailyReport(daily DailyReport) {
+func printDailyReport(daily DailyReport, currency string) {
 	fmt.Println("\n" + strings.Repeat("=", 60))
 	fmt.Printf("                    DAILY REPORT - %s\n", daily.Date)
 	fmt.Println(strings.Repeat("=", 60))
@@ -479,9 +494,9 @@ func printDailyReport(daily DailyReport) {
 	fmt.Printf("├─ Analysis Period: %s\n", report.Summary.TimeSpan)
 	fmt.Printf("├─ Total Bets: %d\n", report.Summary.TotalBets)
 	fmt.Printf("├─ Total Wins: %d\n", report.Summary.TotalWins)
-	fmt.Printf("├─ Total Bet Amount: %s NGN\n", formatCurrency(report.Summary.TotalBetAmount))
-	fmt.Printf("├─ Total Win Amount: %s NGN\n", formatCurrency(report.Summary.TotalWinAmount))
-	fmt.Printf("├─ Net Result: %s NGN\n", formatCurrency(report.Summary.NetResult))
+	fmt.Printf("├─ Total Bet Amount: %s %s\n", formatCurrency(report.Summary.TotalBetAmount), currency)
+	fmt.Printf("├─ Total Win Amount: %s %s\n", formatCurrency(report.Summary.TotalWinAmount), currency)
+	fmt.Printf("├─ Net Result: %s %s\n", formatCurrency(report.Summary.NetResult), currency)
 	fmt.Printf("├─ RTP (Return to Player): %.2f%%\n", report.Summary.RTP)
 	fmt.Printf("├─ Unique Players: %d\n", report.Summary.UniquePlayers)
 	fmt.Printf("└─ Unique Games: %d\n", report.Summary.UniqueGames)
@@ -499,20 +514,20 @@ func printDailyReport(daily DailyReport) {
 		}
 		fmt.Printf("Player ID: %s\n", topPlayerID)
 		fmt.Printf("├─ 📊 Activity: %d bets, %d wins\n", topPlayer.TotalBets, topPlayer.TotalWins)
-		fmt.Printf("├─ 💰 Volume: Bet %s NGN, Win %s NGN\n",
-			formatCurrency(topPlayer.TotalBetAmount), formatCurrency(topPlayer.TotalWinAmount))
-		fmt.Printf("├─ 📉 Net Profit: %s NGN (%.2f%%)\n",
-			formatCurrency(topPlayer.NetResult),
+		fmt.Printf("├─ 💰 Volume: Bet %s %s, Win %s %s\n",
+			formatCurrency(topPlayer.TotalBetAmount), currency, formatCurrency(topPlayer.TotalWinAmount), currency)
+		fmt.Printf("├─ 📉 Net Profit: %s %s (%.2f%%)\n",
+			formatCurrency(topPlayer.NetResult), currency,
 			float64(topPlayer.NetResult)/float64(topPlayer.TotalBetAmount)*100)
-		fmt.Printf("└─ 🎯 RTP: %.2f%%, Current Balance: %s NGN\n",
-			topPlayer.RTP, formatCurrency(topPlayer.LastBalance))
+		fmt.Printf("└─ 🎯 RTP: %.2f%%, Current Balance: %s %s\n",
+			topPlayer.RTP, formatCurrency(topPlayer.LastBalance), currency)
 	}
 
 	// Game performance for the day
 	fmt.Println("\n🎮 GAME PERFORMANCE:")
 	for gameID, stat := range report.GameStats {
-		fmt.Printf("Game: %s - RTP: %.2f%%, Volume: %s NGN\n",
-			gameID, stat.RTP, formatCurrency(stat.TotalBetAmount))
+		fmt.Printf("Game: %s - RTP: %.2f%%, Volume: %s %s\n",
+			gameID, stat.RTP, formatCurrency(stat.TotalBetAmount), currency)
 	}
 
 	fmt.Println(strings.Repeat("-", 60))
@@ -535,10 +550,10 @@ func printOverallReport(report Report) {
 	fmt.Println("                    OVERALL SUMMARY REPORT")
 	fmt.Println(strings.Repeat("=", 60))
 
-	printReport(report)
+	printReport(report, "")
 }
 
-func printReport(report Report) {
+func printReport(report Report, currency string) {
 	fmt.Println("\n" + strings.Repeat("=", 60))
 	fmt.Println("                    GAMING LOGS ANALYSIS REPORT")
 	fmt.Println(strings.Repeat("=", 60))
@@ -548,9 +563,9 @@ func printReport(report Report) {
 	fmt.Printf("├─ Analysis Period: %s\n", report.Summary.TimeSpan)
 	fmt.Printf("├─ Total Bets: %d\n", report.Summary.TotalBets)
 	fmt.Printf("├─ Total Wins: %d\n", report.Summary.TotalWins)
-	fmt.Printf("├─ Total Bet Amount: %s NGN\n", formatCurrency(report.Summary.TotalBetAmount))
-	fmt.Printf("├─ Total Win Amount: %s NGN\n", formatCurrency(report.Summary.TotalWinAmount))
-	fmt.Printf("├─ Net Result: %s NGN\n", formatCurrency(report.Summary.NetResult))
+	fmt.Printf("├─ Total Bet Amount: %s %s\n", formatCurrency(report.Summary.TotalBetAmount), currency)
+	fmt.Printf("├─ Total Win Amount: %s %s\n", formatCurrency(report.Summary.TotalWinAmount), currency)
+	fmt.Printf("├─ Net Result: %s %s\n", formatCurrency(report.Summary.NetResult), currency)
 	fmt.Printf("├─ RTP (Return to Player): %.2f%%\n", report.Summary.RTP)
 	fmt.Printf("├─ Unique Players: %d\n", report.Summary.UniquePlayers)
 	fmt.Printf("└─ Unique Games: %d\n", report.Summary.UniqueGames)
@@ -574,7 +589,7 @@ func printReport(report Report) {
 	for i, pr := range playerRanks[:displayCount] {
 		fmt.Printf("Player #%d: %s\n", i+1, pr.PlayerID)
 		fmt.Printf("├─ 📊 Activity: %d bets, %d wins\n", pr.Stat.TotalBets, pr.Stat.TotalWins)
-		fmt.Printf("├─ 💰 Volume: Bet %s NGN, Win %s NGN\n", formatCurrency(pr.Stat.TotalBetAmount), formatCurrency(pr.Stat.TotalWinAmount))
+		fmt.Printf("├─ 💰 Volume: Bet %s %s, Win %s %s\n", formatCurrency(pr.Stat.TotalBetAmount), currency, formatCurrency(pr.Stat.TotalWinAmount), currency)
 
 		// Profit display in currency and percentage
 		profitPercent := float64(0)
@@ -585,8 +600,8 @@ func printReport(report Report) {
 		if pr.Stat.NetResult < 0 {
 			profitStatus = "📉"
 		}
-		fmt.Printf("├─ %s Net Profit: %s NGN (%.2f%%)\n", profitStatus, formatCurrency(pr.Stat.NetResult), profitPercent)
-		fmt.Printf("├─ 🎯 RTP: %.2f%%, Current Balance: %s NGN\n", pr.Stat.RTP, formatCurrency(pr.Stat.LastBalance))
+		fmt.Printf("├─ %s Net Profit: %s %s (%.2f%%)\n", profitStatus, formatCurrency(pr.Stat.NetResult), currency, profitPercent)
+		fmt.Printf("├─ 🎯 RTP: %.2f%%, Current Balance: %s %s\n", pr.Stat.RTP, formatCurrency(pr.Stat.LastBalance), currency)
 
 		// Top bets (only if they exist)
 		if len(pr.Stat.TopBets) > 0 {
@@ -596,7 +611,7 @@ func printReport(report Report) {
 				if j > 0 {
 					fmt.Printf(", ")
 				}
-				fmt.Printf("%s NGN", formatCurrency(bet.Amount))
+				fmt.Printf("%s %s", formatCurrency(bet.Amount), currency)
 			}
 			fmt.Printf("\n")
 		}
@@ -619,7 +634,7 @@ func printReport(report Report) {
 					if winCount > 0 {
 						fmt.Printf(", ")
 					}
-					fmt.Printf("%s NGN", formatCurrency(win.Amount))
+					fmt.Printf("%s %s", formatCurrency(win.Amount), currency)
 					winCount++
 				}
 			}
@@ -639,8 +654,8 @@ func printReport(report Report) {
 	for gameID, stat := range report.GameStats {
 		fmt.Printf("Game: %s\n", gameID)
 		fmt.Printf("├─ Bets: %d, Wins: %d\n", stat.TotalBets, stat.TotalWins)
-		fmt.Printf("├─ Bet Volume: %s NGN\n", formatCurrency(stat.TotalBetAmount))
-		fmt.Printf("├─ Win Volume: %s NGN\n", formatCurrency(stat.TotalWinAmount))
+		fmt.Printf("├─ Bet Volume: %s %s\n", formatCurrency(stat.TotalBetAmount), currency)
+		fmt.Printf("├─ Win Volume: %s %s\n", formatCurrency(stat.TotalWinAmount), currency)
 		fmt.Printf("├─ RTP: %.2f%%\n", stat.RTP)
 		fmt.Printf("└─ Players: %d\n", stat.Players)
 	}
@@ -649,8 +664,8 @@ func printReport(report Report) {
 	fmt.Println("\n⏰ HOURLY ACTIVITY:")
 	for _, tStat := range report.TimeStats {
 		if tStat.TotalBets > 0 {
-			fmt.Printf("%02d:00 - Bets: %4d, Wins: %4d, Volume: %s NGN\n",
-				tStat.Hour, tStat.TotalBets, tStat.TotalWins, formatCurrency(tStat.TotalBetAmount))
+			fmt.Printf("%02d:00 - Bets: %4d, Wins: %4d, Volume: %s %s\n",
+				tStat.Hour, tStat.TotalBets, tStat.TotalWins, formatCurrency(tStat.TotalBetAmount), currency)
 		}
 	}
 
@@ -673,7 +688,7 @@ func printReport(report Report) {
 	}
 
 	fmt.Println("\n" + strings.Repeat("=", 60))
-	fmt.Println("                        END OF REPORT")
+	fmt.Printf("                     END OF REPORT (%s)\n", currency)
 	fmt.Println(strings.Repeat("=", 60))
 }
 
