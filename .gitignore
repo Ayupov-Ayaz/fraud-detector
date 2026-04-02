@@ -1,1 +1,2 @@
 *.json
+!error_rules.json

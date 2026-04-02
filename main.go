@@ -46,16 +46,64 @@ type GameData struct {
 	Win     int64 `json:"win,omitempty"`
 	Balance int64 `json:"balance"`
 
-	StepNumber int `json:"step_number"`
+	StepNumber int    `json:"step_number"`
+	Error      string `json:"error,omitempty"`
 }
 
 // Report represents the analysis report
 type Report struct {
-	Summary          Summary               `json:"summary"`
-	PlayerStats      map[string]PlayerStat `json:"player_stats"`
-	GameStats        map[string]GameStat   `json:"game_stats"`
-	TimeStats        []TimeStat            `json:"time_stats"`
-	SuspiciousEvents []SuspiciousEvent     `json:"suspicious_events"`
+	Summary           Summary               `json:"summary"`
+	PlayerStats       map[string]PlayerStat `json:"player_stats"`
+	GameStats         map[string]GameStat   `json:"game_stats"`
+	TimeStats         []TimeStat            `json:"time_stats"`
+	SuspiciousEvents  []SuspiciousEvent     `json:"suspicious_events"`
+	IntegrationErrors []IntegrationError    `json:"integration_errors"`
+	UnknownErrors     []UnknownError        `json:"unknown_errors"`
+}
+
+type IntegrationError struct {
+	PlayerID   string `json:"player_id"`
+	OperatorID string `json:"operator_id"`
+	GameID     string `json:"game_id"`
+	Timestamp  string `json:"timestamp"`
+	Command    string `json:"command"`
+	Error      string `json:"error"`
+}
+
+type UnknownError struct {
+	Msg        string `json:"msg"`
+	Level      string `json:"level"`
+	PlayerID   string `json:"player_id"`
+	OperatorID string `json:"operator_id"`
+	GameID     string `json:"game_id"`
+	Timestamp  string `json:"timestamp"`
+	Command    string `json:"command"`
+	Error      string `json:"error"`
+}
+
+// ErrorRule defines how a specific log message should be handled.
+// Actions: "suspicious", "suspicious_combined", "integration_error", "ignore"
+// "suspicious_combined" only flags the player if they also have other suspicious activity.
+type ErrorRule struct {
+	Msg           string `json:"msg"`
+	Action        string `json:"action"`
+	Type          string `json:"type,omitempty"`
+	Description   string `json:"description,omitempty"`
+	ErrorContains string `json:"error_contains,omitempty"`
+}
+
+func loadErrorRules() ([]ErrorRule, error) {
+	data, err := os.ReadFile("error_rules.json")
+	if err != nil {
+		return nil, fmt.Errorf("reading error_rules.json: %w", err)
+	}
+	var wrapper struct {
+		Rules []ErrorRule `json:"rules"`
+	}
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		return nil, fmt.Errorf("parsing error_rules.json: %w", err)
+	}
+	return wrapper.Rules, nil
 }
 
 type Summary struct {
@@ -81,8 +129,9 @@ type PlayerStat struct {
 	TotalWins         int      `json:"total_wins"`
 	TopBets           []TopBet `json:"top_bets"`
 	TopWins           []TopWin `json:"top_wins"`
-	MinBetIntervalSec float64  `json:"min_bet_interval_sec,omitempty"`
-	MaxSpinsPerMinute int      `json:"max_spins_per_minute,omitempty"`
+	MinBetIntervalSec float64        `json:"min_bet_interval_sec,omitempty"`
+	MaxSpinsPerMinute int            `json:"max_spins_per_minute,omitempty"`
+	ErrorCounts       map[string]int `json:"error_counts,omitempty"`
 }
 
 type GameStat struct {
@@ -170,7 +219,13 @@ func run() error {
 
 	fmt.Printf("💰 Detected currency: %s\n", detectedCurrency)
 
-	report := generateReport(gameData, detectedCurrency)
+	rules, err := loadErrorRules()
+	if err != nil {
+		return fmt.Errorf("loading error rules: %w", err)
+	}
+	fmt.Printf("📋 Loaded %d error rules from error_rules.json\n", len(rules))
+
+	report := generateReport(gameData, detectedCurrency, rules)
 
 	printReport(report, detectedCurrency)
 
@@ -190,8 +245,13 @@ func findJSONFiles() ([]string, error) {
 		return nil, fmt.Errorf("globbing files: %w", err)
 	}
 
-	// Sort files by name for consistent processing order
-	return files, nil
+	var dataFiles []string
+	for _, f := range files {
+		if f != "error_rules.json" && f != "loki-config.json" {
+			dataFiles = append(dataFiles, f)
+		}
+	}
+	return dataFiles, nil
 }
 
 func readLogsEntry(fileName string) ([]LogEntry, error) {
@@ -245,7 +305,7 @@ func parseGameData(logs []LogEntry) ([]GameData, error) {
 	return gameData, nil
 }
 
-func generateReport(gameData []GameData, currency string) Report {
+func generateReport(gameData []GameData, currency string, rules []ErrorRule) Report {
 	report := Report{
 		PlayerStats:      make(map[string]PlayerStat),
 		GameStats:        make(map[string]GameStat),
@@ -387,6 +447,53 @@ func generateReport(gameData []GameData, currency string) Report {
 			tStat.TotalWins++
 			tStat.TotalWinAmount += data.Win
 			timeStats[hour] = tStat
+
+		} else if data.Level == "warn" || data.Level == "error" {
+			ts := time.Unix(int64(data.Timestamp), 0).Format("2006-01-02 15:04:05")
+			matched := false
+			for _, rule := range rules {
+				if data.Message != rule.Msg {
+					continue
+				}
+				if rule.ErrorContains != "" && !strings.Contains(data.Error, rule.ErrorContains) {
+					continue
+				}
+				matched = true
+				switch rule.Action {
+				case "ignore":
+					// intentionally skipped
+				case "suspicious", "suspicious_combined":
+					pStat := report.PlayerStats[data.PlayerID]
+					pStat.PlayerID = data.PlayerID
+					if pStat.ErrorCounts == nil {
+						pStat.ErrorCounts = make(map[string]int)
+					}
+					pStat.ErrorCounts[rule.Type]++
+					report.PlayerStats[data.PlayerID] = pStat
+				case "integration_error":
+					report.IntegrationErrors = append(report.IntegrationErrors, IntegrationError{
+						PlayerID:   data.PlayerID,
+						OperatorID: data.OperatorID,
+						GameID:     data.GameID,
+						Timestamp:  ts,
+						Command:    data.Command,
+						Error:      data.Error,
+					})
+				}
+				break
+			}
+			if !matched {
+				report.UnknownErrors = append(report.UnknownErrors, UnknownError{
+					Msg:        data.Message,
+					Level:      data.Level,
+					PlayerID:   data.PlayerID,
+					OperatorID: data.OperatorID,
+					GameID:     data.GameID,
+					Timestamp:  ts,
+					Command:    data.Command,
+					Error:      data.Error,
+				})
+			}
 		}
 	}
 
@@ -463,6 +570,25 @@ func generateReport(gameData []GameData, currency string) Report {
 				Description: "Player is spinning at an abnormally high rate (possible bot)",
 				PlayerID:    playerID,
 				Details:     fmt.Sprintf("Max %d spins/min, min interval between bets: %.2fs", pStat.MaxSpinsPerMinute, pStat.MinBetIntervalSec),
+			})
+		}
+		hasOtherFlags := (pStat.MaxSpinsPerMinute > 30) || (pStat.RTP > 150 && pStat.TotalBets > 100)
+		for _, rule := range rules {
+			if rule.Action != "suspicious" && rule.Action != "suspicious_combined" {
+				continue
+			}
+			count := pStat.ErrorCounts[rule.Type]
+			if count == 0 {
+				continue
+			}
+			if rule.Action == "suspicious_combined" && !hasOtherFlags {
+				continue
+			}
+			report.SuspiciousEvents = append(report.SuspiciousEvents, SuspiciousEvent{
+				Type:        rule.Type,
+				Description: rule.Description,
+				PlayerID:    playerID,
+				Details:     fmt.Sprintf("Occurrences: %d", count),
 			})
 		}
 	}
@@ -656,6 +782,9 @@ func printReport(report Report, currency string) {
 			}
 			fmt.Printf("├─ ⚡ Spin Rate: max %d spins/min, min interval: %.2fs%s\n", pr.Stat.MaxSpinsPerMinute, pr.Stat.MinBetIntervalSec, spinFlag)
 		}
+		for errType, count := range pr.Stat.ErrorCounts {
+			fmt.Printf("├─ ⚠️  %s: %d\n", errType, count)
+		}
 
 		// Top bets (only if they exist)
 		if len(pr.Stat.TopBets) > 0 {
@@ -739,6 +868,49 @@ func printReport(report Report, currency string) {
 		fmt.Printf("├─ No unusual betting patterns identified\n")
 		fmt.Printf("├─ Overall RTP: %.2f%% (within expected range)\n", report.Summary.RTP)
 		fmt.Printf("└─ Game appears to be operating normally\n")
+	}
+
+	// Unknown errors
+	if len(report.UnknownErrors) > 0 {
+		fmt.Printf("\n❓ UNKNOWN ERRORS (%d total — may require investigation):\n", len(report.UnknownErrors))
+		// Group by msg type
+		byMsg := make(map[string][]UnknownError)
+		for _, e := range report.UnknownErrors {
+			byMsg[e.Msg] = append(byMsg[e.Msg], e)
+		}
+		for msg, errs := range byMsg {
+			fmt.Printf("\n  [%s] — %d occurrence(s)\n", msg, len(errs))
+			limit := 3
+			if len(errs) < limit {
+				limit = len(errs)
+			}
+			for _, e := range errs[:limit] {
+				fmt.Printf("  ├─ [%s] level=%s player=%s game=%s cmd=%s\n", e.Timestamp, e.Level, e.PlayerID, e.GameID, e.Command)
+				if e.Error != "" {
+					fmt.Printf("  └─ error: %s\n", e.Error)
+				}
+			}
+			if len(errs) > 3 {
+				fmt.Printf("  └─ ... and %d more\n", len(errs)-3)
+			}
+		}
+	}
+
+	// Integration errors
+	if len(report.IntegrationErrors) > 0 {
+		fmt.Printf("\n🔌 INTEGRATION ERRORS (%d total — contact operators for logs):\n", len(report.IntegrationErrors))
+		// Group by operator
+		byOperator := make(map[string][]IntegrationError)
+		for _, e := range report.IntegrationErrors {
+			byOperator[e.OperatorID] = append(byOperator[e.OperatorID], e)
+		}
+		for opID, errs := range byOperator {
+			fmt.Printf("\n  Operator: %s (%d errors)\n", opID, len(errs))
+			for _, e := range errs {
+				fmt.Printf("  ├─ [%s] player=%s game=%s cmd=%s\n", e.Timestamp, e.PlayerID, e.GameID, e.Command)
+				fmt.Printf("  └─ error: %s\n", e.Error)
+			}
+		}
 	}
 
 	fmt.Println("\n" + strings.Repeat("=", 60))
