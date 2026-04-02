@@ -1,0 +1,83 @@
+{
+  "_docs": {
+    "description": "Rules for classifying warn/error log events. Add a new object to 'rules' to handle a new error type.",
+    "fields": {
+      "msg": "Value of the 'msg' field in the log entry to match (required)",
+      "action": "What to do with this event — see actions below (required)",
+      "type": "Display name shown in the report — required for: suspicious, suspicious_combined",
+      "description": "Human-readable explanation shown in the report — required for: suspicious, suspicious_combined",
+      "error_contains": "Optional substring match against the 'error' field. If set, rule only applies when 'error' contains this value."
+    },
+    "actions": {
+      "ignore": "Silently skip — use for safe service messages that don't need attention",
+      "suspicious": "Immediately flag the player as suspicious in the report",
+      "suspicious_combined": "Flag the player only if they also have other suspicious activity (high RTP, spin rate, etc.)",
+      "integration_error": "Add to the Integration Errors section — requires follow-up with the operator for their logs"
+    }
+  },
+  "rules": [
+    {
+      "msg": "unmarshal command request",
+      "action": "suspicious",
+      "type": "Decode request body failed",
+      "description": "The user attempts to change existing request types or modifies the request in an attempt to find server vulnerabilities."
+    },
+    {
+      "msg": "unmarshal payload",
+      "action": "suspicious",
+      "type": "Decode request body failed",
+      "description": "The user attempts to change existing request types or modifies the request in an attempt to find server vulnerabilities."
+    },
+    {
+      "msg": "unmarshaling request",
+      "action": "suspicious",
+      "type": "Decode request body failed",
+      "description": "The user attempts to change existing request types or modifies the request in an attempt to find server vulnerabilities."
+    },
+    {
+      "msg": "invalid bet value",
+      "action": "suspicious_combined",
+      "type": "Invalid Bet in the request",
+      "description": "The user submitted a bid that is outside the acceptable range."
+    },
+    {
+      "msg": "buy bonus not attempts",
+      "action": "suspicious",
+      "type": "Bonus Buy Bypass",
+      "description": "Attempted to buy bonus during active bonus — impossible via game client"
+    },
+    {
+      "msg": "invalid client id",
+      "action": "suspicious_combined",
+      "type": "Multi-Session",
+      "description": "Connected from multiple devices simultaneously — suspicious when combined with other flags"
+    },
+    {
+      "msg": "GetBalance",
+      "action": "integration_error",
+      "error_contains": "500"
+    },
+    {
+      "msg": "SendBet",
+      "action": "integration_error",
+      "error_contains": "500"
+    },
+    {
+      "msg": "SendWin",
+      "action": "integration_error",
+      "error_contains": "500"
+    },
+    {
+      "msg": "get approve to add gift games",
+      "action": "ignore"
+    },
+    {
+      "msg": "stash transaction",
+      "action": "ignore"
+    },
+    {
+      "msg": "commit transaction",
+      "action": "ignore"
+    }
+  ]
+}
