@@ -71,16 +71,18 @@ type Summary struct {
 }
 
 type PlayerStat struct {
-	PlayerID       string   `json:"player_id"`
-	RTP            float64  `json:"rtp_percentage"`
-	TotalBetAmount int64    `json:"total_bet_amount"`
-	TotalWinAmount int64    `json:"total_win_amount"`
-	NetResult      int64    `json:"net_result"`
-	LastBalance    int64    `json:"last_balance"`
-	TotalBets      int      `json:"total_bets"`
-	TotalWins      int      `json:"total_wins"`
-	TopBets        []TopBet `json:"top_bets"`
-	TopWins        []TopWin `json:"top_wins"`
+	PlayerID          string   `json:"player_id"`
+	RTP               float64  `json:"rtp_percentage"`
+	TotalBetAmount    int64    `json:"total_bet_amount"`
+	TotalWinAmount    int64    `json:"total_win_amount"`
+	NetResult         int64    `json:"net_result"`
+	LastBalance       int64    `json:"last_balance"`
+	TotalBets         int      `json:"total_bets"`
+	TotalWins         int      `json:"total_wins"`
+	TopBets           []TopBet `json:"top_bets"`
+	TopWins           []TopWin `json:"top_wins"`
+	MinBetIntervalSec float64  `json:"min_bet_interval_sec,omitempty"`
+	MaxSpinsPerMinute int      `json:"max_spins_per_minute,omitempty"`
 }
 
 type GameStat struct {
@@ -265,6 +267,7 @@ func generateReport(gameData []GameData, currency string) Report {
 		playerBalances         = make(map[string][]int64)
 		duplicateBets  int     = 0
 		duplicateWins  int     = 0
+		playerBetTimestamps    = make(map[string][]float64)
 	)
 
 	// Process each game data entry
@@ -306,6 +309,9 @@ func generateReport(gameData []GameData, currency string) Report {
 
 			totalBets++
 			totalBetAmount += data.Bet
+
+			// Track bet timestamps for spin rate analysis
+			playerBetTimestamps[data.PlayerID] = append(playerBetTimestamps[data.PlayerID], data.Timestamp)
 
 			// Update player stats
 			pStat := report.PlayerStats[data.PlayerID]
@@ -384,6 +390,39 @@ func generateReport(gameData []GameData, currency string) Report {
 		}
 	}
 
+	// Calculate spin rate per player
+	for playerID, timestamps := range playerBetTimestamps {
+		if len(timestamps) < 2 {
+			continue
+		}
+		sort.Float64s(timestamps)
+
+		// Minimum interval between consecutive bets
+		minInterval := timestamps[1] - timestamps[0]
+		for i := 2; i < len(timestamps); i++ {
+			if interval := timestamps[i] - timestamps[i-1]; interval < minInterval {
+				minInterval = interval
+			}
+		}
+
+		// Max spins in any 60-second sliding window
+		maxSpins := 0
+		left := 0
+		for right := 0; right < len(timestamps); right++ {
+			for timestamps[right]-timestamps[left] > 60 {
+				left++
+			}
+			if count := right - left + 1; count > maxSpins {
+				maxSpins = count
+			}
+		}
+
+		pStat := report.PlayerStats[playerID]
+		pStat.MinBetIntervalSec = minInterval
+		pStat.MaxSpinsPerMinute = maxSpins
+		report.PlayerStats[playerID] = pStat
+	}
+
 	// Calculate derived stats
 	for playerID, pStat := range report.PlayerStats {
 		pStat.NetResult = pStat.TotalWinAmount - pStat.TotalBetAmount
@@ -416,6 +455,14 @@ func generateReport(gameData []GameData, currency string) Report {
 				Description: "Player has suspiciously high RTP",
 				PlayerID:    playerID,
 				Details:     fmt.Sprintf("RTP: %.2f%%, Bets: %d", pStat.RTP, pStat.TotalBets),
+			})
+		}
+		if pStat.MaxSpinsPerMinute > 30 {
+			report.SuspiciousEvents = append(report.SuspiciousEvents, SuspiciousEvent{
+				Type:        "High Spin Rate",
+				Description: "Player is spinning at an abnormally high rate (possible bot)",
+				PlayerID:    playerID,
+				Details:     fmt.Sprintf("Max %d spins/min, min interval between bets: %.2fs", pStat.MaxSpinsPerMinute, pStat.MinBetIntervalSec),
 			})
 		}
 	}
@@ -602,6 +649,13 @@ func printReport(report Report, currency string) {
 		}
 		fmt.Printf("├─ %s Net Profit: %s %s (%.2f%%)\n", profitStatus, formatCurrency(pr.Stat.NetResult), currency, profitPercent)
 		fmt.Printf("├─ 🎯 RTP: %.2f%%, Current Balance: %s %s\n", pr.Stat.RTP, formatCurrency(pr.Stat.LastBalance), currency)
+		if pr.Stat.MaxSpinsPerMinute > 0 {
+			spinFlag := ""
+			if pr.Stat.MaxSpinsPerMinute > 30 {
+				spinFlag = " ⚠️"
+			}
+			fmt.Printf("├─ ⚡ Spin Rate: max %d spins/min, min interval: %.2fs%s\n", pr.Stat.MaxSpinsPerMinute, pr.Stat.MinBetIntervalSec, spinFlag)
+		}
 
 		// Top bets (only if they exist)
 		if len(pr.Stat.TopBets) > 0 {
