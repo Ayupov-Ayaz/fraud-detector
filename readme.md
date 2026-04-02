@@ -182,15 +182,75 @@ Each log file should contain an array of log entries:
 ### Automatic Detection Triggers:
 
 1. **High RTP Alert**: Players with >150% RTP and >100 bets
-2. **Duplicate Transactions**: Automatically detected and reported
-3. **Data Integrity Issues**: Missing or malformed data
+2. **High Spin Rate**: Players exceeding 30 spins per minute in any 60-second window (possible bot)
+3. **Bonus Buy Bypass**: Attempt to buy bonus during an active bonus — impossible via the game client
+4. **Multi-Session + Other Flags**: Player connected from multiple devices simultaneously, combined with other suspicious activity
+5. **Duplicate Transactions**: Automatically detected and reported
+6. **Custom Error Rules**: Any `warn`/`error` log event matched by a rule in `error_rules.json`
 
 ### Fraud Indicators:
 
 - Suspiciously high win rates
-- Unusual betting patterns
+- Abnormally fast spin rate (bot-like behavior)
+- Client bypass attempts (modifying requests, buying bonus during active bonus)
 - Duplicate transaction attempts
 - Abnormal balance changes
+
+## ⚡ Spin Rate Analysis
+
+Each player's betting speed is analyzed automatically:
+
+- **Max spins/min**: maximum number of bets placed in any 60-second window
+- **Min interval**: shortest time between two consecutive bets (in seconds)
+
+A player is flagged as suspicious if they exceed **30 spins/min** (less than 2 seconds average between bets). This threshold indicates automated/bot-like behavior, as real players typically take 3–5 seconds per spin.
+
+The spin rate is shown per player in the report:
+```
+├─ ⚡ Spin Rate: max 45 spins/min, min interval: 0.34s ⚠️
+```
+
+## ⚙️ Error Rules Configuration
+
+Error classification is driven entirely by `error_rules.json` — no code changes needed to add new error types.
+
+### Adding a new rule
+
+Open `error_rules.json` and add an object to the `rules` array:
+
+```json
+{
+  "msg": "your error message here",
+  "action": "suspicious",
+  "type": "Short Display Name",
+  "description": "What this error means and why it matters"
+}
+```
+
+### Available actions
+
+| Action | Behavior |
+|--------|----------|
+| `ignore` | Silently skip — for safe service messages |
+| `suspicious` | Immediately flag the player as suspicious |
+| `suspicious_combined` | Flag only if the player also has other suspicious activity |
+| `integration_error` | Add to Integration Errors section — requires follow-up with operator |
+
+### Optional field: `error_contains`
+
+Use this to match only when the log `error` field contains a specific substring:
+
+```json
+{
+  "msg": "GetBalance",
+  "action": "integration_error",
+  "error_contains": "500"
+}
+```
+
+### Unknown errors
+
+Any `warn`/`error` level event that doesn't match any rule is automatically collected into the **Unknown Errors** section of the report. This ensures no new error type goes unnoticed — review these periodically and add rules for recurring ones.
 
 ## 💡 Examples
 

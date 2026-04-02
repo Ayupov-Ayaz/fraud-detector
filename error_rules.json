@@ -58,6 +58,16 @@
       "error_contains": "500"
     },
     {
+      "msg": "SendBet",
+      "action": "integration_error",
+      "error_contains": "500"
+    },
+    {
+      "msg": "SendWin",
+      "action": "integration_error",
+      "error_contains": "500"
+    },
+    {
       "msg": "get approve to add gift games",
       "action": "ignore"
     },
